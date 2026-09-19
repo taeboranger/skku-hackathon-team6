@@ -1,3 +1,13 @@
+cd team6
+corepack pnpm install
+corepack pnpm dev:cloudflare
+
+
+
+
+
+
+
 # SKKU 2026 team6 — Channel App
 
 **SKKU 2026 team6** · [이 팀의 리소스와 준비 상태](TEAM.md)
