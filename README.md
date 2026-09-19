@@ -1,6 +1,6 @@
-cd team6
-corepack pnpm install
-corepack pnpm dev:cloudflare
+- cd team6
+- corepack pnpm install
+- corepack pnpm dev:cloudflare
 
 
 
