@@ -7,7 +7,7 @@ self.addEventListener("push", (event) => {
       } catch {
         const text = event.data ? event.data.text() : "새 알림이 도착했어요.";
         d = {
-          title: "캠퍼스 핑 알림",
+          title: "스꾸핑 알림",
           body: text,
           answerType: "text",
           requestId: "test-" + Date.now(),

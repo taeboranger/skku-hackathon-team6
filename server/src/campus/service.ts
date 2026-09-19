@@ -1,11 +1,18 @@
 import { z } from "zod";
 import { db, rows, row, AppError } from "./server.js";
 import { analyze, groundedAnswer } from "./ai.js";
-import { reach, rankCandidate, similarity, type Profile } from "./domain.js";
+import {
+  CATEGORIES,
+  reach,
+  rankCandidate,
+  similarity,
+  type Profile,
+} from "./domain.js";
 import { resolveLocationCoordinates } from "./naver.js";
 export const questionInput = z.object({
   title: z.string().trim().min(3).max(140),
   body: z.string().trim().min(2).max(3000),
+  category: z.enum(CATEGORIES).or(z.literal("")).default(""),
   department: z.string().trim().max(80).default("전체 학과"),
   location: z.string().trim().max(80).default(""),
   targetHint: z.string().trim().max(300).default(""),
@@ -71,7 +78,10 @@ export async function createQuestion(
     throw new AppError("한 시간에 질문은 10개까지 등록할 수 있어요.", 429);
 
   const a = await analyze(v);
-  const coords = await resolveLocationCoordinates(a.location, v.title + " " + v.body);
+  const coords = await resolveLocationCoordinates(
+    a.location,
+    v.title + " " + v.body,
+  );
   a.lat = coords.lat;
   a.lng = coords.lng;
 
@@ -99,7 +109,7 @@ export async function createQuestion(
   const writes = [
     db()
       .prepare(
-        `INSERT INTO questions(id,author_id,request_id,title,body,department,location,target_hint,realtime,answer_type,tags,ai_answer,sources,status,channel_chat_id,lat,lng,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)`,
+        `INSERT INTO questions(id,author_id,request_id,title,body,category,department,location,target_hint,realtime,answer_type,tags,ai_answer,sources,status,channel_chat_id,lat,lng,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?)`,
       )
       .bind(
         id,
@@ -107,6 +117,7 @@ export async function createQuestion(
         v.requestId,
         v.title,
         v.body,
+        a.category,
         a.department,
         a.location,
         v.targetHint,

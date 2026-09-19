@@ -13,3 +13,10 @@
 .dev.vars*
 cloudflare/static/
 cloudflare/bundle/
+
+# AWS deployment build artifacts
+.aws-build/
+.aws-bundle.tar.gz
+aws/.env.aws
+# ...but the template must stay in the repo (.env.* above would hide it).
+!aws/.env.aws.example

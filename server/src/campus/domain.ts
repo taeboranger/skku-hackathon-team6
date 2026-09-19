@@ -11,9 +11,32 @@ export type Profile = {
   lat?: number | null;
   lng?: number | null;
 };
+// 질문 주제 분류. 답변자 라우팅에 쓰는 department(학과), 긴급 여부인 realtime과
+// 직교하는 축이다. 값을 바꾸면 0003 마이그레이션 이후 데이터와 AI 분류가 함께 흔들리므로
+// 추가는 자유롭게, 이름 변경은 보정 SQL과 함께 한다.
+export const CATEGORIES = [
+  "수업·학점",
+  "시설·장소",
+  "식당·카페",
+  "행정·장학",
+  "동아리·행사",
+  "취업·진로",
+  "생활·교통",
+  "기타",
+] as const;
+export type Category = (typeof CATEGORIES)[number];
+export const DEFAULT_CATEGORY: Category = "기타";
+export function isCategory(value: unknown): value is Category {
+  return (
+    typeof value === "string" &&
+    (CATEGORIES as readonly string[]).includes(value)
+  );
+}
+
 export type Analysis = {
   realtime: boolean;
   answerType: "yes_no" | "short" | "text";
+  category: Category;
   department: string;
   location: string;
   tags: string[];
@@ -108,11 +131,10 @@ export function rankCandidate(
   }
   const rate = (stats.answered + 2) / (stats.sent + 4);
   const score = Math.min(1, match) * 0.75 + rate * 0.25;
-  const eligible =
-    match > 0 &&
-    stats.today < (p.role === "senior" ? 20 : 100) &&
-    (p.role !== "senior" ||
-      (score >= 0.65 && rate >= 0.5 && now - stats.lastSent > 4 * 3600000));
+  // 데모 설정: 선배는 제한 없이 모두 발송 대상이 된다.
+  // 원래는 점수 0.65 이상 · 답변률 0.5 이상 · 마지막 발송 후 4시간 경과를 요구했고,
+  // 하루 발송량도 20건으로 묶여 있었다. 운영 전환 시 되돌릴 자리.
+  const eligible = p.role === "senior" || (match > 0 && stats.today < 100);
   return {
     id: p.id,
     score,
@@ -121,4 +143,3 @@ export function rankCandidate(
     role: p.role,
   };
 }
-

@@ -1,13 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { withCampus, row, db } from "./campus/server.js";
 import { createQuestion, answerQuestion, expire } from "./campus/service.js";
 import { GET, POST } from "./campus/routes.js";
-import { rankCandidate, reach, haversineDistance, type Profile } from "./campus/domain.js";
+import {
+  rankCandidate,
+  reach,
+  haversineDistance,
+  type Analysis,
+  type Profile,
+} from "./campus/domain.js";
 import { channelWebhook, deliverChannelReplies } from "./campus/channel.js";
-import { resolveLocationCoordinates, findSKKUPoiCoordinates } from "./campus/naver.js";
+import {
+  resolveLocationCoordinates,
+  findSKKUPoiCoordinates,
+} from "./campus/naver.js";
 
 test("non-realtime questions reuse stored human answers with valid source IDs", async (t) => {
   const f = fixture();
@@ -25,6 +34,7 @@ test("non-realtime questions reuse stored human answers with valid source IDs", 
         : {
             realtime: false,
             answerType: "text",
+            category: "행정·장학",
             department: "컴퓨터공학과",
             location: "",
             tags: ["복수전공"],
@@ -70,12 +80,11 @@ test("non-realtime questions reuse stored human answers with valid source IDs", 
 
 function fixture() {
   const sqlite = new DatabaseSync(":memory:");
-  sqlite.exec(
-    readFileSync(
-      new URL("../../cloudflare/migrations/0002_campus.sql", import.meta.url),
-      "utf8",
-    ),
-  );
+  const migrations = new URL("../../cloudflare/migrations/", import.meta.url);
+  for (const name of readdirSync(migrations).sort()) {
+    if (name.endsWith(".sql"))
+      sqlite.exec(readFileSync(new URL(name, migrations), "utf8"));
+  }
   function prepare(sql: string) {
     const statement = {
       args: [] as any[],
@@ -162,6 +171,7 @@ function mockAI(t: any) {
               text: JSON.stringify({
                 realtime: false,
                 answerType: "yes_no",
+                category: "식당·카페",
                 department: "컴퓨터공학과",
                 location: "학생회관",
                 tags: ["식당"],
@@ -359,7 +369,7 @@ test("webhook retry preserves conversation stage and durable reply retries separ
     );
   });
 });
-test("senior thresholds, cooldown, stale locations and point reach caps", () => {
+test("seniors are always reachable in demo mode; freshmen still need a match", () => {
   const now = Date.now(),
     p = {
       id: "s",
@@ -368,24 +378,42 @@ test("senior thresholds, cooldown, stale locations and point reach caps", () => 
       location: "학생회관",
       locationAt: now,
     } as Profile;
-  const analysis = {
+  const a: Analysis = {
     realtime: true,
     answerType: "yes_no",
+    category: "식당·카페",
     department: "컴퓨터공학과",
     location: "학생회관",
     tags: [],
-  } as const;
-  const a = { ...analysis, tags: [] };
+  };
   const stats = { sent: 10, answered: 9, today: 0, lastSent: 0 };
+  // 데모 설정: 쿨다운이나 오래된 위치와 무관하게 선배는 항상 대상이다.
   assert.equal(rankCandidate(a, p, [], "질문", stats, now).eligible, true);
   assert.equal(
     rankCandidate(a, p, [], "질문", { ...stats, lastSent: now }, now).eligible,
-    false,
+    true,
   );
   assert.equal(
     rankCandidate(
       a,
       { ...p, locationAt: now - 3600000 },
+      [],
+      "질문",
+      stats,
+      now,
+    ).eligible,
+    true,
+  );
+  // 신입생은 여전히 접점이 하나라도 있어야 한다.
+  const freshman = { ...p, id: "f", role: "freshman" } as Profile;
+  assert.equal(
+    rankCandidate(a, freshman, [], "질문", stats, now).eligible,
+    true,
+  );
+  assert.equal(
+    rankCandidate(
+      { ...a, department: "전체 학과", location: "" },
+      { ...freshman, department: "타학과", location: "" },
       [],
       "질문",
       stats,
@@ -401,17 +429,20 @@ test("Naver POI geocoding, Haversine distance, and real-time location updates", 
   // 1. POI Map Lookup
   const poi = findSKKUPoiCoordinates("학생회관");
   assert.notEqual(poi, null);
-  assert.equal(poi?.lat, 37.2940);
-  assert.equal(poi?.lng, 126.9750);
+  assert.equal(poi?.lat, 37.294);
+  assert.equal(poi?.lng, 126.975);
 
   // 2. Haversine distance calculation (between Student Union and Samsung Library)
-  const dist = haversineDistance(37.2940, 126.9750, 37.2936, 126.9743);
+  const dist = haversineDistance(37.294, 126.975, 37.2936, 126.9743);
   assert.ok(dist > 50 && dist < 150); // ~75 meters
 
   // 3. Resolve location coordinates for SKKU Campus text
-  const resolved = await resolveLocationCoordinates("학생회관", "학생회관에 사람 많나요?");
-  assert.equal(resolved.lat, 37.2940);
-  assert.equal(resolved.lng, 126.9750);
+  const resolved = await resolveLocationCoordinates(
+    "학생회관",
+    "학생회관에 사람 많나요?",
+  );
+  assert.equal(resolved.lat, 37.294);
+  assert.equal(resolved.lng, 126.975);
 
   // 4. API & DB tests
   const f = fixture();
@@ -425,14 +456,28 @@ test("Naver POI geocoding, Haversine distance, and real-time location updates", 
     // Respondent updates real-time GPS location near Student Union
     const locReq = new Request("http://localhost:8787/api/location", {
       method: "POST",
-      headers: { "content-type": "application/json", origin: "http://localhost:8787" },
-      body: JSON.stringify({ lat: 37.2941, lng: 126.9751, locationName: "학생회관 앞" }),
+      headers: {
+        "content-type": "application/json",
+        origin: "http://localhost:8787",
+      },
+      body: JSON.stringify({
+        lat: 37.2941,
+        lng: 126.9751,
+        locationName: "학생회관 앞",
+      }),
     });
 
     // Run POST /api/location as respondent
-    const profileRow = await row("SELECT * FROM profiles WHERE id=?", respondent.id);
-    await db().prepare("UPDATE profiles SET lat=37.2941, lng=126.9751, location='학생회관 앞', location_at=? WHERE id=?")
-      .bind(Date.now(), respondent.id).run();
+    const profileRow = await row(
+      "SELECT * FROM profiles WHERE id=?",
+      respondent.id,
+    );
+    await db()
+      .prepare(
+        "UPDATE profiles SET lat=37.2941, lng=126.9751, location='학생회관 앞', location_at=? WHERE id=?",
+      )
+      .bind(Date.now(), respondent.id)
+      .run();
 
     // Author posts question "학생회관에 사람 많나요?"
     const qRes = await createQuestion(author, {
@@ -445,13 +490,15 @@ test("Naver POI geocoding, Haversine distance, and real-time location updates", 
       requestId: "geo-req-1",
     });
 
-    assert.equal(qRes.question.lat, 37.2940);
-    assert.equal(qRes.question.lng, 126.9750);
+    assert.equal(qRes.question.lat, 37.294);
+    assert.equal(qRes.question.lng, 126.975);
 
     // Check delivered recommendation candidate request reason
-    const reqRow = await row("SELECT * FROM requests WHERE question_id=?", qRes.question.id);
+    const reqRow = await row(
+      "SELECT * FROM requests WHERE question_id=?",
+      qRes.question.id,
+    );
     assert.notEqual(reqRow, null);
     assert.match(reqRow.reason, /근처|거리/);
   });
 });
-

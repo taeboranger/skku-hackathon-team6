@@ -11,8 +11,6 @@ import {
   Search,
   Users,
   Send,
-  Radio,
-  Sparkles,
 } from "lucide-react";
 import {
   Dialog,
@@ -20,12 +18,13 @@ import {
   DialogTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toaster, toast } from "sonner";
+import { bootChannelTalk, openChannelTalk } from "./channel";
 type Q = {
   id: string;
   title: string;
   body: string;
+  category: string;
   department: string;
   location: string;
   realtime: number;
@@ -48,6 +47,50 @@ type P = {
   points: number;
   location: string;
 };
+// server/src/campus/domain.ts 의 CATEGORIES 와 같은 순서를 유지한다.
+const categories = [
+  "수업·학점",
+  "시설·장소",
+  "식당·카페",
+  "행정·장학",
+  "동아리·행사",
+  "취업·진로",
+  "생활·교통",
+  "기타",
+];
+// 디버그 로그인용 시드 계정. scripts/seed-campus.mjs 의 people 과 일치해야 한다.
+const SEED_PASSWORD = "seedpass1234";
+const seedUsers = [
+  { id: "seed-p1", name: "김민준", role: "신입생" },
+  { id: "seed-p2", name: "이서연", role: "신입생" },
+  { id: "seed-p3", name: "박지호", role: "신입생" },
+  { id: "seed-p4", name: "최수빈", role: "신입생" },
+  { id: "seed-s1", name: "정하은", role: "선배" },
+  { id: "seed-s2", name: "한지우", role: "선배" },
+  { id: "seed-s3", name: "오태윤", role: "선배" },
+];
+// 데모용: 배포본에서도 시드 계정으로 바로 로그인할 수 있게 항상 노출한다.
+// 공개 URL에 원클릭 로그인이 노출되므로, 운영 전환 시 되돌릴 자리.
+const debugMode = true;
+
+// server/src/campus/naver.ts 의 POI_MAP 키워드와 같은 표기를 유지한다.
+// 이 이름이 그대로 좌표로 해석되어 '질문 장소 근처' 가점에 쓰인다.
+const campusLocations = [
+  "학생회관",
+  "삼성학술정보관",
+  "제1공학관",
+  "제2공학관",
+  "복지회관",
+  "봉룡학사",
+  "자연과학관",
+  "기초학문관",
+  "의학관",
+  "약학관",
+  "생명공학관",
+  "수성관",
+  "체육관",
+  "정문",
+];
 const departments = [
   "컴퓨터공학과",
   "경영학과",
@@ -60,6 +103,7 @@ const departments = [
 const initialDraft = {
   title: "",
   body: "",
+  category: "",
   department: "전체 학과",
   location: "",
   targetHint: "",
@@ -105,6 +149,8 @@ export default function Campus() {
     [error, setError] = useState(""),
     [view, setView] = useState("all"),
     [search, setSearch] = useState(""),
+    [category, setCategory] = useState(""),
+    [debugOpen, setDebugOpen] = useState(false),
     [modal, setModal] = useState(""),
     [selected, setSelected] = useState<Q | null>(null),
     [answers, setAnswers] = useState<any[]>([]),
@@ -158,7 +204,12 @@ export default function Campus() {
     return () => clearInterval(t);
   }, [data.profile?.id]);
   useEffect(() => {
-    if (!data.profile || typeof navigator === "undefined" || !navigator.geolocation) return;
+    if (
+      !data.profile ||
+      typeof navigator === "undefined" ||
+      !navigator.geolocation
+    )
+      return;
     let watchId: number | null = null;
     const sendLocation = (pos: GeolocationPosition) => {
       const lat = pos.coords.latitude;
@@ -166,11 +217,11 @@ export default function Campus() {
       void api("location", { lat, lng }).catch(() => {});
     };
     try {
-      watchId = navigator.geolocation.watchPosition(
-        sendLocation,
-        () => {},
-        { enableHighAccuracy: true, maximumAge: 30000, timeout: 20000 }
-      );
+      watchId = navigator.geolocation.watchPosition(sendLocation, () => {}, {
+        enableHighAccuracy: true,
+        maximumAge: 30000,
+        timeout: 20000,
+      });
     } catch {}
     return () => {
       if (watchId !== null) navigator.geolocation.clearWatch(watchId);
@@ -203,6 +254,33 @@ export default function Campus() {
     ).catch(() => {});
     return () => c.abort();
   }, []);
+  useEffect(() => {
+    const pluginKey = data.config?.channelPluginKey;
+    if (!pluginKey) return;
+    let cancelled = false;
+    void (async () => {
+      let member: {
+        memberId?: string;
+        memberHash?: string;
+        profile?: Record<string, unknown>;
+      } = {};
+      if (data.profile) {
+        // 서버만 멤버 해시를 계산할 수 있다. 실패해도 익명으로는 띄운다.
+        member = await api("channel").catch(() => ({}));
+      }
+      if (cancelled) return;
+      const status = await bootChannelTalk({
+        pluginKey,
+        hideDefaultButton: true,
+        ...member,
+      });
+      if (status === "boot-rejected" || status === "load-failed")
+        console.warn("[channel-talk]", status);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [data.config?.channelPluginKey, data.profile?.id]);
   function needProfile() {
     if (!data.authenticated) {
       setModal("login");
@@ -214,7 +292,9 @@ export default function Campus() {
     }
     return true;
   }
-  function fetchGPSLocation(onSuccess: (locName: string, lat?: number, lng?: number) => void) {
+  function fetchGPSLocation(
+    onSuccess: (locName: string, lat?: number, lng?: number) => void,
+  ) {
     if (typeof navigator === "undefined" || !navigator.geolocation) {
       toast.error("이 브라우저에서는 GPS 위치를 지원하지 않아요.");
       return;
@@ -227,14 +307,18 @@ export default function Campus() {
         const lngStr = lng.toFixed(3);
         onSuccess(`위도 ${latStr}, 경도 ${lngStr}`, lat, lng);
         if (data.profile) {
-          void api("location", { lat, lng, locationName: `위도 ${latStr}, 경도 ${lngStr}` }).catch(() => {});
+          void api("location", {
+            lat,
+            lng,
+            locationName: `위도 ${latStr}, 경도 ${lngStr}`,
+          }).catch(() => {});
         }
         toast.success("현재 GPS 위치를 가져왔어요!");
       },
       (err) => {
         toast.error("위치 권한을 허용해 주세요: " + err.message);
       },
-      { timeout: 10000, enableHighAccuracy: true }
+      { timeout: 10000, enableHighAccuracy: true },
     );
   }
   async function run(fn: () => Promise<void>) {
@@ -298,32 +382,6 @@ export default function Campus() {
       toast.success("이 기기로 답변 요청을 받을 수 있어요.");
     });
   }
-  async function openChannel() {
-    if (!needProfile()) return;
-    await run(async () => {
-      const config = await api("channel");
-      const w = window as any;
-      if (!w.ChannelIO) {
-        const ch: any = (...args: any[]) => ch.q.push(args);
-        ch.q = [];
-        w.ChannelIO = ch;
-        await new Promise<void>((resolve, reject) => {
-          const s = document.createElement("script");
-          s.src = "https://cdn.channel.io/plugin/ch-plugin-web.js";
-          s.onload = () => resolve();
-          s.onerror = () => reject(Error("채널톡을 불러오지 못했어요."));
-          document.body.appendChild(s);
-        });
-      }
-      w.ChannelIO("boot", config, (err: any) => {
-        if (err) {
-          toast.error("채널톡 연결에 실패했어요.");
-          return;
-        }
-        w.ChannelIO("showMessenger");
-      });
-    });
-  }
   function editProfile() {
     if (needProfile()) {
       const p = data.profile!;
@@ -342,51 +400,55 @@ export default function Campus() {
     (q) =>
       (view !== "urgent" || q.realtime) &&
       (view !== "mine" || q.authorId === p?.id) &&
-      `${q.title} ${q.body} ${q.department}`.includes(search),
+      (!category || q.category === category) &&
+      `${q.title} ${q.body} ${q.department} ${q.category}`.includes(search),
   );
   return (
     <>
       <Toaster richColors position="top-center" />
-      <header className="topbar">
-        <a className="brand" href="/">
-          <span className="brand-mark">
-            <Zap size={23} fill="currentColor" />
-          </span>
-          캠퍼스 핑<span className="beta">BETA</span>
-        </a>
-        <span className="top-caption">
-          서로의 경험이, 가장 빠른 답이 되도록.
-        </span>
-        <div className="header-actions">
-          <button
-            className="icon-button"
-            aria-label="답변 요청 알림"
-            onClick={() => {
-              if (needProfile()) setModal("notifications");
-            }}
-          >
-            <Bell size={21} />
-            {data.requests.length > 0 && <b className="notification-dot" />}
-          </button>
-          <button className="account-button" onClick={editProfile}>
-            {p ? (
-              <>
-                <span className="avatar">{p.name.slice(0, 1)}</span>
-                {p.name}
-              </>
-            ) : (
-              "로그인 / 가입"
-            )}
-          </button>
-        </div>
-      </header>
       <div className="workspace">
         <aside className="left-rail">
-          <p className="nav-label">CAMPUS COMMUNITY</p>
+          <div className="rail-head">
+            <a className="brand rail-brand" href="/">
+              <span className="brand-mark" aria-hidden="true">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+                  <circle cx="12" cy="12" r="2.6" fill="currentColor" />
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="6.2"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    opacity="0.75"
+                  />
+                  <circle
+                    cx="12"
+                    cy="12"
+                    r="9.8"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    opacity="0.4"
+                  />
+                </svg>
+              </span>
+              스꾸핑
+            </a>
+            <button
+              className="icon-button"
+              aria-label="답변 요청 알림"
+              onClick={() => {
+                if (needProfile()) setModal("notifications");
+              }}
+            >
+              <Bell size={21} />
+              {data.requests.length > 0 && <b className="notification-dot" />}
+            </button>
+          </div>
+          <p className="nav-label">커뮤니티</p>
           <nav>
             {[
               ["all", "전체 질문", MessageCircle],
-              ["urgent", "지금 필요한 답변", Zap],
+              ["urgent", "긴급 질문", Zap],
               ["requests", "나에게 온 질문", Bell],
               ["mine", "내가 올린 질문", Users],
             ].map(([key, label, Icon]: any) => (
@@ -405,7 +467,7 @@ export default function Campus() {
             ))}
           </nav>
           <div className="rail-divider" />
-          <p className="nav-label">MY CAMPUS</p>
+          <p className="nav-label">내 캠퍼스</p>
           <button
             className="campus-link"
             onClick={() => {
@@ -422,28 +484,17 @@ export default function Campus() {
             <MapPin size={19} />
             {p?.location || "내 위치 설정"}
           </button>
-          <div className="rail-bottom">
-            <span className="mini-mark">↗</span>
-            <b>아는 만큼, 나누는 캠퍼스</b>
-            <p>
-              당신의 짧은 답변이
-              <br />
-              누군가에겐 큰 도움이 돼요.
-            </p>
-          </div>
         </aside>
-        <main className="main">
+        <main className="main" key={view}>
           <div className="page-heading">
             <div>
-              <span className="eyebrow">작은 질문, 빠른 연결</span>
               <h1>
                 {view === "mine"
                   ? "내가 올린 질문"
                   : view === "urgent"
-                    ? "지금 필요한 답변"
-                    : "캠퍼스의 궁금한 순간"}
+                    ? "긴급 질문"
+                    : "전체 질문"}
               </h1>
-              <p>지금 답을 아는 사람에게 물어보세요.</p>
             </div>
             <button
               className="primary"
@@ -458,41 +509,28 @@ export default function Campus() {
                 : "질문 올리기"}
             </button>
           </div>
-          <section className="signal-banner">
-            <div>
-              <span className="live-label">
-                <Radio size={15} /> CAMPUS SOS
-              </span>
-              <h2>지금, 누군가의 답이 필요해요.</h2>
-              <p>가까이 있는 사람과 경험이 있는 사람을 연결해요.</p>
-              <button
-                onClick={() => {
-                  setView("urgent");
-                  setSearch("");
-                }}
-              >
-                긴급 질문 살펴보기 <ArrowUpRight size={17} />
-              </button>
-            </div>
-            <div className="signal-art" aria-hidden="true">
-              <div className="orbit" />
-              <div className="orbit orbit-two" />
-              <div className="signal-core">
-                <Zap size={35} fill="currentColor" />
-              </div>
-              <span className="signal-chip">지금 답할 수 있어요!</span>
-            </div>
-          </section>
           <div className="feed-tools">
-            <Tabs value={view} onValueChange={setView}>
-              <TabsList className="feed-tabs">
-                <TabsTrigger value="all">전체 질문</TabsTrigger>
-                <TabsTrigger value="urgent">긴급 질문</TabsTrigger>
-                {view === "mine" && (
-                  <TabsTrigger value="mine">내 질문</TabsTrigger>
-                )}
-              </TabsList>
-            </Tabs>
+            <div
+              className="category-filter"
+              role="group"
+              aria-label="주제 분류"
+            >
+              <button
+                className={category === "" ? "active" : ""}
+                onClick={() => setCategory("")}
+              >
+                전체
+              </button>
+              {categories.map((c) => (
+                <button
+                  key={c}
+                  className={category === c ? "active" : ""}
+                  onClick={() => setCategory(category === c ? "" : c)}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
             <label className="search">
               <Search size={17} />
               <input
@@ -518,42 +556,34 @@ export default function Campus() {
                 onClick={() => void openQuestion(q)}
               >
                 <div className="card-meta">
-                  <span
-                    className={
-                      "tag " + (q.realtime ? "urgent-tag" : "normal-tag")
-                    }
-                  >
-                    {q.realtime ? (
-                      <>
-                        <Zap size={12} />
-                        실시간
-                      </>
-                    ) : (
-                      q.department
-                    )}
-                  </span>
+                  {!!q.realtime && (
+                    <span className="tag urgent-tag">
+                      <Zap size={12} />
+                      실시간
+                    </span>
+                  )}
+                  {q.category && (
+                    <span className="tag category-tag">{q.category}</span>
+                  )}
                   {q.location && (
                     <span className="muted">
                       <MapPin size={13} />
                       {q.location}
                     </span>
                   )}
+                  {q.department && q.department !== "전체 학과" && (
+                    <span className="muted">{q.department}</span>
+                  )}
                   <span className="card-time">{ago(q.createdAt)}</span>
                 </div>
-                <h3>{q.title}</h3>
-                <p>{q.body}</p>
-                <div className="card-bottom">
-                  <span>
-                    <span className="tiny-avatar">
-                      {q.authorName.slice(0, 1)}
-                    </span>
-                    {q.authorName}
-                    <span className="muted"> · {q.department}</span>
-                  </span>
+                <div className="card-main">
+                  <div className="card-text">
+                    <h3>{q.title}</h3>
+                    <p>{q.body}</p>
+                  </div>
                   <span className="answer-count">
                     <MessageCircle size={15} />
                     답변 {q.answerCount}
-                    {q.aiAnswer && <Sparkles size={14} />}
                   </span>
                 </div>
               </button>
@@ -562,12 +592,7 @@ export default function Campus() {
           {!loading && !error && !questions.length && (
             <div className="empty">
               <MessageCircle size={30} />
-              <h3>첫 번째 핑을 보내보세요</h3>
-              <p>
-                “지금 학생회관 식당에 자리 있나요?”
-                <br />
-                작은 질문부터 시작해도 좋아요.
-              </p>
+              <h3>아직 질문이 없어요.</h3>
               <button
                 className="secondary"
                 onClick={() => {
@@ -583,16 +608,11 @@ export default function Campus() {
           <section className="points-card">
             <div className="section-title">
               <span>나의 도움 포인트</span>
-              <Zap size={18} />
             </div>
             <div className="points">
               {p?.points ?? "—"}
               <small>P</small>
             </div>
-            <p>
-              도움을 나눌수록
-              <br />내 질문이 더 멀리 닿아요.
-            </p>
             <div className="point-meter">
               <span
                 style={{ width: Math.min(100, (p?.points || 0) / 3) + "%" }}
@@ -616,53 +636,93 @@ export default function Campus() {
           </section>
           <section className="request-card">
             <div className="section-title">
-              <h2>당신의 답변을 기다려요</h2>
+              <h2>답변 요청</h2>
               <Bell size={17} />
             </div>
-            <div className="request-icon">
-              <MessageCircle size={25} />
-            </div>
             <p>
-              {data.requests.length ? (
-                `${data.requests.length}개의 답변 요청이 도착했어요.`
-              ) : (
-                <>
-                  잘 답할 수 있는 질문이 오면
-                  <br />
-                  여기에 알려드릴게요.
-                </>
-              )}
+              {data.requests.length
+                ? `${data.requests.length}개의 답변 요청이 도착했어요.`
+                : "받은 요청이 없어요."}
             </p>
             <button className="secondary" onClick={() => void enablePush()}>
               <Bell size={16} />
               브라우저 알림 켜기
             </button>
           </section>
-          <section className="how-card">
-            <h2>캠퍼스 핑 이용 방법</h2>
-            <ol>
-              {[
-                ["궁금한 순간, 질문하기", "상황과 장소를 함께 알려주세요."],
-                ["답을 아는 사람과 연결", "학과, 경험, 최근 위치로 찾아요."],
-                ["짧은 답변으로 도움 주기", "답변하면 포인트가 쌓여요."],
-              ].map(([title, body], i) => (
-                <li key={title}>
-                  <span>{i + 1}</span>
-                  <div>
-                    <b>{title}</b>
-                    <p>{body}</p>
-                  </div>
-                </li>
-              ))}
-            </ol>
-          </section>
-          <p className="footnote">캠퍼스 핑 · 함께 만드는 캠퍼스</p>
         </aside>
       </div>
-      <button className="chat-fab" onClick={() => void openChannel()}>
-        <MessageCircle size={21} />
-        대화로 질문하기
-      </button>
+      <div className="profile-dock">
+        <button className="account-button" onClick={editProfile}>
+          {p ? (
+            <>
+              <span className="avatar">{p.name.slice(0, 1)}</span>
+              {p.name}
+            </>
+          ) : (
+            "로그인 / 가입"
+          )}
+        </button>
+      </div>
+      {data.config?.channelPluginKey && (
+        <button
+          className="chat-fab"
+          onClick={() => openChannelTalk()}
+          aria-label="채널톡으로 문의하기"
+        >
+          <MessageCircle size={20} />
+          문의하기
+        </button>
+      )}
+      {debugMode && (
+        <div className={"debug-panel" + (debugOpen ? " open" : "")}>
+          <button
+            className="debug-toggle"
+            onClick={() => setDebugOpen((v) => !v)}
+            aria-expanded={debugOpen}
+          >
+            디버그 {debugOpen ? "▾" : "▸"}
+          </button>
+          {debugOpen && (
+            <div className="debug-body">
+              <p>
+                시드 계정으로 로그인해요.
+                <br />
+                <code>corepack pnpm db:seed</code> 를 먼저 실행하세요.
+              </p>
+              {seedUsers.map((u) => (
+                <button
+                  key={u.id}
+                  onClick={() =>
+                    void run(async () => {
+                      await api("auth/login", {
+                        email: `${u.id}@skku.test`,
+                        password: SEED_PASSWORD,
+                      });
+                      await refresh();
+                      toast.success(`${u.name} (${u.role}) 으로 로그인했어요.`);
+                    })
+                  }
+                >
+                  <b>{u.name}</b>
+                  <span>{u.role}</span>
+                </button>
+              ))}
+              <button
+                className="debug-logout"
+                onClick={() =>
+                  void run(async () => {
+                    await api("auth/logout", {});
+                    await refresh();
+                    toast.success("로그아웃했어요.");
+                  })
+                }
+              >
+                로그아웃
+              </button>
+            </div>
+          )}
+        </div>
+      )}
       <Dialog
         open={!!modal}
         onOpenChange={(open) => {
@@ -823,7 +883,7 @@ export default function Campus() {
               </label>
               <label>
                 현재 장소 (선택)
-                <div style={{ display: 'flex', gap: '8px' }}>
+                <div style={{ display: "flex", gap: "8px" }}>
                   <input
                     maxLength={80}
                     placeholder="예: 학생회관, 공학관"
@@ -838,10 +898,10 @@ export default function Campus() {
                   <button
                     type="button"
                     className="text-button"
-                    style={{ whitespace: 'nowrap', fontSize: '13px' }}
+                    style={{ whiteSpace: "nowrap", fontSize: "13px" }}
                     onClick={() =>
                       fetchGPSLocation((loc) =>
-                        setRegistration((prev) => ({ ...prev, location: loc }))
+                        setRegistration((prev) => ({ ...prev, location: loc })),
                       )
                     }
                   >
@@ -889,7 +949,7 @@ export default function Campus() {
                   toast.success(
                     draft.realtime
                       ? "실시간 질문을 등록했어요. 현장 답변자를 찾고 있어요!"
-                      : "질문을 등록했어요."
+                      : "질문을 등록했어요.",
                   );
                 });
               }}
@@ -919,6 +979,20 @@ export default function Campus() {
               </label>
               <div className="form-row">
                 <label>
+                  주제 분류
+                  <select
+                    value={draft.category}
+                    onChange={(e) =>
+                      setDraft({ ...draft, category: e.target.value })
+                    }
+                  >
+                    <option value="">자동 분류</option>
+                    {categories.map((c) => (
+                      <option key={c}>{c}</option>
+                    ))}
+                  </select>
+                </label>
+                <label>
                   관련 학과
                   <select
                     value={draft.department}
@@ -935,27 +1009,55 @@ export default function Campus() {
                 <label>
                   장소
                   <input
+                    list="campus-locations"
                     maxLength={80}
-                    placeholder="예: 학생회관"
+                    placeholder="검색하거나 선택하세요"
                     value={draft.location}
                     onChange={(e) =>
                       setDraft({ ...draft, location: e.target.value })
                     }
                   />
+                  <datalist id="campus-locations">
+                    {campusLocations.map((l) => (
+                      <option key={l} value={l} />
+                    ))}
+                  </datalist>
                 </label>
               </div>
               <label>
                 어떤 사람이 답해주면 좋을까요?
-                <input
-                  maxLength={300}
-                  placeholder="예: 지금 학생회관 식당에 있는 사람"
-                  value={draft.targetHint}
-                  onChange={(e) =>
-                    setDraft({ ...draft, targetHint: e.target.value })
-                  }
-                />
+                <span className="input-with-action">
+                  <input
+                    maxLength={300}
+                    placeholder="예: 지금 학생회관에 있는 사람"
+                    value={draft.targetHint}
+                    onChange={(e) =>
+                      setDraft({ ...draft, targetHint: e.target.value })
+                    }
+                  />
+                  <button
+                    type="button"
+                    className="field-action"
+                    disabled={!draft.location}
+                    title={
+                      draft.location
+                        ? `지금 ${draft.location}에 있는 사람`
+                        : "장소를 먼저 선택하세요"
+                    }
+                    onClick={() =>
+                      setDraft({
+                        ...draft,
+                        targetHint: `지금 ${draft.location}에 있는 사람`,
+                      })
+                    }
+                  >
+                    장소와 동일
+                  </button>
+                </span>
               </label>
-              <label className="check-row">
+              <label
+                className={"realtime-toggle" + (draft.realtime ? " on" : "")}
+              >
                 <input
                   type="checkbox"
                   checked={draft.realtime}
@@ -963,11 +1065,16 @@ export default function Campus() {
                     setDraft({ ...draft, realtime: e.target.checked })
                   }
                 />
-                지금 상황에 대한 질문이에요
+                <span className="realtime-copy">
+                  <b>
+                    <Zap size={15} />
+                    지금 상황에 대한 질문이에요
+                  </b>
+                  <small>
+                    AI 과거 답변을 쓰지 않고 현장에 있는 사람에게 바로 전달해요.
+                  </small>
+                </span>
               </label>
-              <p className="form-hint">
-                실시간 질문은 AI 과거 답변을 사용하지 않고 사람에게 전달해요.
-              </p>
               <button className="primary" disabled={busy}>
                 <Send size={17} />
                 {busy ? "분석하고 연결하는 중…" : "질문 등록하기"}
@@ -987,15 +1094,12 @@ export default function Campus() {
               {selected.realtime ? (
                 <div className="notice">
                   <Zap size={17} />
-                  지금 상황이 중요해요. 현장의 답변을 기다리고 있어요.
+                  실시간 질문이에요.
                 </div>
               ) : (
                 selected.aiAnswer && (
                   <div className="ai-answer">
-                    <b>
-                      <Sparkles size={17} />
-                      이전 답변을 참고한 AI 답변
-                    </b>
+                    <b>이전 답변을 참고한 AI 답변</b>
                     <p>{selected.aiAnswer}</p>
                     {(selected.sources || []).map((id) => (
                       <button

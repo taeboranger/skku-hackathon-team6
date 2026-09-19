@@ -22,6 +22,8 @@
     "build:cloudflare": "pnpm build && node scripts/build-cloudflare.mjs",
     "dev:cloudflare": "wrangler dev --config wrangler.jsonc --local",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:seed": "node scripts/seed-campus.mjs",
+    "demo:push": "node scripts/demo-push.mjs",
     "test:cloudflare": "node scripts/smoke-cloudflare.mjs",
     "test:campus": "node scripts/smoke-campus.mjs"
   },

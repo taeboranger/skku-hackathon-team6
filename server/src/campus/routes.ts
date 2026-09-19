@@ -21,6 +21,7 @@ import {
   answerQuestion,
   expire,
 } from "./service.js";
+import { aiKey } from "./ai.js";
 import { deliverPush, validEndpoint } from "./push.js";
 import { channelWebhook } from "./channel.js";
 import { resolveLocationCoordinates } from "./naver.js";
@@ -61,7 +62,8 @@ export async function GET(request: Request) {
         config: {
           vapidPublicKey: setting("VAPID_PUBLIC_KEY"),
           channelReady: !!setting("CHANNEL_PLUGIN_KEY"),
-          aiReady: !!setting("OPENAI_API_KEY"),
+          channelPluginKey: setting("CHANNEL_PLUGIN_KEY"),
+          aiReady: !!aiKey(),
         },
       });
     }
@@ -81,7 +83,10 @@ export async function GET(request: Request) {
       const p = await profile();
       const pluginKey = setting("CHANNEL_PLUGIN_KEY");
       if (!pluginKey)
-        throw new AppError("채널톡 플러그인 키(CHANNEL_PLUGIN_KEY) 설정이 필요해요.", 503);
+        throw new AppError(
+          "채널톡 플러그인 키(CHANNEL_PLUGIN_KEY) 설정이 필요해요.",
+          503,
+        );
       const secret = setting("CHANNEL_MEMBER_HASH_SECRET");
       return Response.json({
         pluginKey,
@@ -181,7 +186,12 @@ export async function POST(request: Request) {
         )
         .bind(loc.lat, loc.lng, locationName, now, p.id)
         .run();
-      return Response.json({ ok: true, lat: loc.lat, lng: loc.lng, locationAt: now });
+      return Response.json({
+        ok: true,
+        lat: loc.lat,
+        lng: loc.lng,
+        locationAt: now,
+      });
     }
     if (path === "questions") {
       await expire();
@@ -257,7 +267,14 @@ export async function POST(request: Request) {
           .prepare(
             `INSERT OR REPLACE INTO deliveries(id,request_id,endpoint,status,attempts,next_at,created_at) SELECT r.id||':'||?,r.id,?, 'pending',0,?,? FROM requests r JOIN questions q ON q.id=r.question_id WHERE r.user_id=? AND r.status='pending' AND r.expires_at>? AND q.status='open'`,
           )
-          .bind(crypto.randomUUID().slice(0, 8), s.endpoint, now, now, p.id, now),
+          .bind(
+            crypto.randomUUID().slice(0, 8),
+            s.endpoint,
+            now,
+            now,
+            p.id,
+            now,
+          ),
       ]);
       await deliverPush();
       return Response.json({ ok: true });

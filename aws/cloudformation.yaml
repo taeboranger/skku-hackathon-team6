@@ -1,0 +1,257 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >-
+  SKKU team6 Campus app - throwaway AWS deployment.
+  A single EC2 instance runs the Node server with SQLite on its EBS volume,
+  fronted by CloudFront for free HTTPS on a *.cloudfront.net domain.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label: { default: Networking }
+        Parameters: [VpcId, SubnetId]
+      - Label: { default: Application bundle }
+        Parameters: [BundleBucket, BundleKey, EnvParameterName]
+      - Label: { default: Instance }
+        Parameters: [InstanceType, VolumeSizeGb]
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the instance (the account's default VPC is fine).
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: >-
+      Public subnet in the VPC above. It must auto-assign public IPs so the
+      instance can reach OpenAI/Letsur, Naver and the Channel API without a
+      NAT gateway.
+  BundleBucket:
+    Type: String
+    Description: S3 bucket holding the application bundle tarball.
+  BundleKey:
+    Type: String
+    Description: S3 key of the application bundle tarball.
+  EnvParameterName:
+    Type: String
+    Description: >-
+      SSM Parameter Store name (SecureString) holding the dotenv application
+      configuration. Secrets stay out of this template and out of UserData.
+  InstanceType:
+    Type: String
+    Default: t3.small
+    AllowedValues: [t3.micro, t3.small, t3.medium, t4g.small, t4g.medium]
+    Description: t3.* are x86_64; t4g.* are Graviton/arm64.
+  VolumeSizeGb:
+    Type: Number
+    Default: 20
+    MinValue: 8
+    MaxValue: 200
+    Description: Root EBS volume size. The SQLite database lives here.
+
+Conditions:
+  IsArm: !Or
+    - !Equals [!Ref InstanceType, t4g.small]
+    - !Equals [!Ref InstanceType, t4g.medium]
+
+Resources:
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        # Shell access through Session Manager, so the instance needs no key pair
+        # and no inbound SSH.
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: bundle-and-config-read
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:${AWS::Partition}:s3:::${BundleBucket}/${BundleKey}
+              - Effect: Allow
+                Action: [ssm:GetParameter, ssm:GetParameters]
+                Resource: !Sub arn:${AWS::Partition}:ssm:${AWS::Region}:${AWS::AccountId}:parameter${EnvParameterName}
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !Sub arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:alias/aws/ssm
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  InstanceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HTTP from CloudFront to the campus app origin
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        # The origin is plain HTTP; CloudFront terminates TLS. Open to 0.0.0.0/0
+        # because this stack uses the instance's public DNS as the origin.
+        # Lock this to the CloudFront prefix list for anything beyond a demo.
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP from CloudFront
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Outbound to Letsur, Naver, Channel API and web push
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-sg
+
+  AppInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !If
+        - IsArm
+        - "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64}}"
+        - "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64}}"
+      IamInstanceProfile: !Ref InstanceProfile
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref InstanceSecurityGroup]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: !Ref VolumeSizeGb
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+          exec > >(tee /var/log/campus-bootstrap.log | logger -t campus -s 2>/dev/console) 2>&1
+
+          dnf install -y tar xz
+
+          # Node 24: the server relies on node:sqlite and the repo pins node >=24.
+          curl -fsSL https://rpm.nodesource.com/setup_24.x | bash -
+          dnf install -y nodejs
+          node --version
+
+          install -d -m 755 /opt/campus
+          install -d -m 700 /var/lib/campus
+
+          aws s3 cp "s3://${BundleBucket}/${BundleKey}" /tmp/bundle.tar.gz --region ${AWS::Region}
+          tar -xzf /tmp/bundle.tar.gz -C /opt/campus
+          rm -f /tmp/bundle.tar.gz
+
+          # Application config comes from SSM at boot, never from this template.
+          aws ssm get-parameter \
+            --name "${EnvParameterName}" \
+            --with-decryption \
+            --region ${AWS::Region} \
+            --query Parameter.Value \
+            --output text > /etc/campus.env
+          chmod 600 /etc/campus.env
+
+          useradd --system --home-dir /opt/campus --shell /sbin/nologin campus || true
+          chown -R campus:campus /opt/campus /var/lib/campus
+
+          cat > /etc/systemd/system/campus.service <<'UNIT'
+          [Unit]
+          Description=SKKU team6 Campus app
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=campus
+          WorkingDirectory=/opt/campus
+          EnvironmentFile=/etc/campus.env
+          Environment=PORT=80
+          Environment=DB_PATH=/var/lib/campus/app.sqlite
+          Environment=NODE_ENV=production
+          ExecStart=/usr/bin/node /opt/campus/aws/server.mjs
+          Restart=always
+          RestartSec=3
+          # Port 80 as a non-root user.
+          AmbientCapabilities=CAP_NET_BIND_SERVICE
+          NoNewPrivileges=true
+          ProtectSystem=strict
+          ReadWritePaths=/var/lib/campus
+          PrivateTmp=true
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          systemctl daemon-reload
+          systemctl enable --now campus.service
+
+          # Report bootstrap success or failure back to CloudFormation.
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource AppInstance --region ${AWS::Region}
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub ${AWS::StackName} campus app
+        HttpVersion: http2
+        IPV6Enabled: true
+        PriceClass: PriceClass_200
+        Origins:
+          - Id: campus-origin
+            DomainName: !GetAtt AppInstance.PublicDnsName
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              HTTPPort: 80
+              OriginReadTimeout: 60
+        DefaultCacheBehavior:
+          TargetOriginId: campus-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods: [GET, HEAD, OPTIONS, PUT, POST, PATCH, DELETE]
+          CachedMethods: [GET, HEAD]
+          Compress: true
+          # Managed-CachingDisabled: the app is dynamic and session aware.
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+          # Managed-AllViewerExceptHostHeader: forwards cookies, query strings and
+          # the Origin header the app's CSRF check needs, while letting the origin
+          # keep its own Host.
+          OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+        CacheBehaviors:
+          # Vite emits content-hashed filenames, so these are immutable.
+          - PathPattern: /assets/*
+            TargetOriginId: campus-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            # Managed-CachingOptimized
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          - PathPattern: /resource/wam/tutorial/assets/*
+            TargetOriginId: campus-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods: [GET, HEAD]
+            Compress: true
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+
+Outputs:
+  AppUrl:
+    Description: Public HTTPS URL. Set APP_ORIGIN to this value.
+    Value: !Sub https://${Distribution.DomainName}
+  DistributionId:
+    Description: CloudFront distribution id (for cache invalidation).
+    Value: !Ref Distribution
+  InstanceId:
+    Description: Connect with - aws ssm start-session --target <id>
+    Value: !Ref AppInstance
+  OriginDomain:
+    Description: Instance public DNS used as the CloudFront origin.
+    Value: !GetAtt AppInstance.PublicDnsName

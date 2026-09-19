@@ -21,7 +21,7 @@ export default function Campus() {
   const [loaded, setLoaded] = useState(false)
   return (
     <section style={{ padding: '16px 0', borderTop: '1px solid #ddd' }}>
-      <h2>캠퍼스 핑 질문 현황</h2>
+      <h2>스꾸핑 질문 현황</h2>
       <button
         disabled={loading || !data}
         onClick={() => {

@@ -49,7 +49,7 @@ async function sendReply(event: any) {
       "/user-chats/" +
         encodeURIComponent(event.chatId) +
         "/messages?botName=" +
-        encodeURIComponent("캠퍼스 핑"),
+        encodeURIComponent("스꾸핑"),
       "POST",
       {
         blocks: [

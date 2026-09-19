@@ -1,13 +1,13 @@
-# 캠퍼스 핑 개발 & 자율 가이드 (운영진 요청 없이 독립 실행)
+# 스꾸핑 개발 & 자율 가이드 (운영진 요청 없이 독립 실행)
 
-본 문서는 **성균관대 해커톤 팀6 (SKKU 2026 Team6)**의 **캠퍼스 핑 (Campus Ping)** 프로젝트 분석 및 개발 자율화 통합 가이드입니다.  
+본 문서는 **성균관대 해커톤 팀6 (SKKU 2026 Team6)**의 **스꾸핑 (SKKU Ping)** 프로젝트 분석 및 개발 자율화 통합 가이드입니다.  
 개발 폴더는 `team6/`입니다.
 
 ---
 
 ## 1. 프로젝트 분석 및 완성 현황
 
-Codex가 진행하던 캠퍼스 핑 프로젝트의 전체 구조를 분석하고, 로컬 환경에서 외부 의존성(OpenAI, 채널톡 Open API 등) 없이 완전하게 동작하도록 보완 및 빌드·검증을 마쳤습니다.
+Codex가 진행하던 스꾸핑 프로젝트의 전체 구조를 분석하고, 로컬 환경에서 외부 의존성(OpenAI, 채널톡 Open API 등) 없이 완전하게 동작하도록 보완 및 빌드·검증을 마쳤습니다.
 
 ### 🧩 전체 시스템 구성
 
@@ -17,7 +17,7 @@ Codex가 진행하던 캠퍼스 핑 프로젝트의 전체 구조를 분석하�
 | **서버 & API** | `server/src/campus/` | D1 SQLite ORM, 회원 인증(세션/패스워드), 질문 분류/매칭 로직, Web Push, 채널톡 Webhook |
 | **App SDK Function** | `server/src/campus.functions.ts` | `campus.searchAnswers`, `campus.submitQuestion`, `campus.listQuestions` (Manager 전용) |
 | **WAM 패널** | `wam/src/pages/Campus.tsx` | 채널톡 데스크 Manager 화면용 실시간 질문 현황 리스트 패널 |
-| **DB 마이그레이션** | `cloudflare/migrations/0002_campus.sql` | `profiles`, `questions`, `answers`, `requests`, `ledger`, `events` 등 캠퍼스 핑 핵심 테이블 |
+| **DB 마이그레이션** | `cloudflare/migrations/0002_campus.sql` | `profiles`, `questions`, `answers`, `requests`, `ledger`, `events` 등 스꾸핑 핵심 테이블 |
 | **로컬 검증 스크립트** | `scripts/smoke-campus.mjs` | HMAC 서명 기반 API 및 Function 엔드포인트 자동 검증 |
 
 ---
@@ -166,7 +166,7 @@ corepack pnpm --filter @tutorial/server register
 공용 성균관대 해커톤 배포 서버(`skku-team6.skku-hackathon-2026.workers.dev`)에 운영진이 직접 배포해주는 방식을 사용할 경우에만 아래 양식을 전달하세요.
 
 ```text
-팀6 캠퍼스 핑 연동 요청입니다.
+팀6 스꾸핑 연동 요청입니다.
 1. team6의 cloudflare/migrations/0002_campus.sql 원격 적용을 요청합니다.
    DB: skku-team6 / 4f49239e-4283-49fa-8a08-335d546a8bfa
 2. OPENAI_API_KEY, CHANNEL_PLUGIN_KEY, CHANNEL_MEMBER_HASH_SECRET,
